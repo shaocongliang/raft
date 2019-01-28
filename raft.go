@@ -1507,7 +1507,7 @@ func (r *Raft) lookupServer(id ServerID) *Server {
 	return nil
 }
 
-func (r *Raft) pickTransferLeadershipTarget() *Server {
+func (r *Raft) pickServer() *Server {
 	for _, server := range r.configurations.latest.Servers {
 		if server.ID != r.localID {
 			return &server
