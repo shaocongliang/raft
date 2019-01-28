@@ -48,6 +48,10 @@ var (
 	// ErrCantBootstrap is returned when attempt is made to bootstrap a
 	// cluster that already has state present.
 	ErrCantBootstrap = errors.New("bootstrap only works on new clusters")
+
+	// ErrNoTransitionLeadershipTarget is returned wher attempt is made to
+	// transition leadership but there is no peer to transition to.
+	ErrNoTransitionLeadershipTarget = errors.New("tried to transition leadership, but didn't find a peer")
 )
 
 // Raft implements a Raft node.
@@ -1016,7 +1020,26 @@ func (r *Raft) TransitionLeadership() Future {
 		return errorFuture{ErrNotLeader}
 	}
 
-	r.transitionLeadership()
+	s := r.pickTransferLeadershipTarget()
+	if s == nil {
+		return errorFuture{ErrNoTransitionLeadershipTarget}
+	}
+
+	r.transitionLeadership(s.ID)
+
+	return nil
+}
+
+func (r *Raft) TransitionLeadershipToServer(id ServerID) Future {
+	if r.protocolVersion < 3 {
+		return errorFuture{ErrUnsupportedProtocol}
+	}
+
+	if r.getState() != Leader {
+		return errorFuture{ErrNotLeader}
+	}
+
+	r.transitionLeadership(id)
 
 	return nil
 }
