@@ -1017,7 +1017,7 @@ func (r *Raft) TransitionLeadership() Future {
 
 	s := r.pickTransferLeadershipTarget()
 	if s == nil {
-		return errorFuture{errors.New("tried to transition leadership, but didn't find a peer")}
+		return errorFuture{errors.New("cannot find peer")}
 	}
 
 	return r.transitionLeadership(s.ID, s.Address)
