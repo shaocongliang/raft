@@ -248,6 +248,8 @@ func (r *Raft) runCandidate() {
 
 	// Start vote for us, and set a timeout
 	voteCh := r.electSelf()
+	defer func() { r.candidateFromTransitionLeadership = false }()
+
 	electionTimer := randomTimeout(r.conf.ElectionTimeout)
 
 	// Tally the votes, need a simple majority
@@ -521,15 +523,21 @@ func (r *Raft) leaderLoop() {
 				continue
 			}
 
-			if s.nextIndex <= r.getLastIndex() {
+			for s.nextIndex <= r.getLastIndex() {
 				r.logger.Printf("[DEBUG] raft: waiting for replication to catch up before sending TimeoutNow")
 				err := &deferError{}
 				err.init()
 				s.triggerDeferErrorCh <- err
 				if err.Error() != nil {
 					r.logger.Printf("[DEBUG] raft: replication failed: %v", err.Error())
-					continue
+					future.respond(err.Error())
+					break
 				}
+			}
+			// when replication fails, we might not have catched up
+			// but we send out the response an logged the problem
+			if s.nextIndex <= r.getLastIndex() {
+				continue
 			}
 
 			r.logger.Printf("[DEBUG] raft: sending TimeoutNow now because replication is up to date")
@@ -1222,7 +1230,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 
 	// Check if we have an existing leader [who's not the candidate]
 	candidate := r.trans.DecodePeer(req.Candidate)
-	if leader := r.Leader(); leader != "" && leader != candidate {
+	if leader := r.Leader(); leader != "" && leader != candidate && !req.TriggeredByTransitionLeadership {
 		r.logger.Printf("[WARN] raft: Rejecting vote request from %v since we have a leader: %v",
 			candidate, leader)
 		return
@@ -1439,11 +1447,12 @@ func (r *Raft) electSelf() <-chan *voteResult {
 	// Construct the request
 	lastIdx, lastTerm := r.getLastEntry()
 	req := &RequestVoteRequest{
-		RPCHeader:    r.getRPCHeader(),
-		Term:         r.getCurrentTerm(),
-		Candidate:    r.trans.EncodePeer(r.localID, r.localAddr),
-		LastLogIndex: lastIdx,
-		LastLogTerm:  lastTerm,
+		RPCHeader:                       r.getRPCHeader(),
+		Term:                            r.getCurrentTerm(),
+		Candidate:                       r.trans.EncodePeer(r.localID, r.localAddr),
+		LastLogIndex:                    lastIdx,
+		LastLogTerm:                     lastTerm,
+		TriggeredByTransitionLeadership: r.candidateFromTransitionLeadership,
 	}
 
 	// Construct a function to ask for a vote
@@ -1555,5 +1564,6 @@ func (r *Raft) transitionLeadership(id ServerID, address ServerAddress) Transiti
 func (r *Raft) timeoutNow(rpc RPC, req *TimeoutNowRequest) {
 	r.setLeader("")
 	r.setState(Candidate)
+	r.candidateFromTransitionLeadership = true
 	rpc.Respond(&TimeoutNowResponse{}, nil)
 }

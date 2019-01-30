@@ -96,6 +96,8 @@ type Raft struct {
 	// leaderState used only while state is leader
 	leaderState leaderState
 
+	candidateFromTransitionLeadership bool
+
 	// Stores our local server ID, used to avoid sending RPCs to ourself
 	localID ServerID
 
@@ -463,7 +465,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		configurationsCh:       make(chan *configurationsFuture, 8),
 		bootstrapCh:            make(chan *bootstrapFuture),
 		observers:              make(map[uint64]*Observer),
-		transitionLeadershipCh: make(chan *transitionLeadershipFuture),
+		transitionLeadershipCh: make(chan *transitionLeadershipFuture, 64),
 	}
 
 	// Initialize as a follower.
