@@ -169,7 +169,7 @@ func (r *Raft) runFollower() {
 			// Reject any restores since we are not the leader
 			r.respond(ErrNotLeader)
 
-		case r := <-r.transitionLeadershipCh:
+		case r := <-r.leadershipTransferCh:
 			// Reject any operations since we are not the leader
 			r.respond(ErrNotLeader)
 
@@ -248,7 +248,7 @@ func (r *Raft) runCandidate() {
 
 	// Start vote for us, and set a timeout
 	voteCh := r.electSelf()
-	defer func() { r.candidateFromTransitionLeadership = false }()
+	defer func() { r.candidateFromLeadershipTransfer = false }()
 
 	electionTimer := randomTimeout(r.conf.ElectionTimeout)
 
@@ -512,12 +512,12 @@ func (r *Raft) leaderLoop() {
 		case <-r.leaderState.stepDown:
 			r.setState(Follower)
 
-		case future := <-r.transitionLeadershipCh:
+		case future := <-r.leadershipTransferCh:
 			// TODO: do everything async
 
 			s, ok := r.leaderState.replState[future.ID]
 			if !ok {
-				err := fmt.Errorf("cannot find replication state for %v, aborting transition leadership", future)
+				err := fmt.Errorf("cannot find replication state for %v, aborting leadership transfer", future)
 				r.logger.Printf("[WARN] raft: %s", err)
 				future.respond(err)
 				continue
@@ -543,7 +543,7 @@ func (r *Raft) leaderLoop() {
 			r.logger.Printf("[DEBUG] raft: sending TimeoutNow now because replication is up to date")
 			err := r.trans.TimeoutNow(future.ID, future.Address, &TimeoutNowRequest{RPCHeader: r.getRPCHeader()}, &TimeoutNowResponse{})
 			if err != nil {
-				err = fmt.Errorf("failed to make TimeoutNow RPC to %v: %v, aborting transition leadership", future, err)
+				err = fmt.Errorf("failed to make TimeoutNow RPC to %v: %v, aborting leadership transfer", future, err)
 				r.logger.Printf("[WARN] raft: %s", err)
 				future.respond(err)
 				continue
@@ -554,10 +554,10 @@ func (r *Raft) leaderLoop() {
 			go func() {
 				select {
 				case err := <-verify.errCh:
-					r.logger.Printf("[DEBUG] raft: resetting transition leadership: %s", err)
+					r.logger.Printf("[DEBUG] raft: resetting leadership transfer: %s", err)
 					future.respond(nil)
 				case <-randomTimeout(r.conf.HeartbeatTimeout):
-					err := fmt.Errorf("timing out transition leadership")
+					err := fmt.Errorf("timing out leadership transfer")
 					r.logger.Printf("[WARN] raft: %s", err)
 					future.respond(err)
 				}
@@ -1230,7 +1230,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 
 	// Check if we have an existing leader [who's not the candidate]
 	candidate := r.trans.DecodePeer(req.Candidate)
-	if leader := r.Leader(); leader != "" && leader != candidate && !req.TriggeredByTransitionLeadership {
+	if leader := r.Leader(); leader != "" && leader != candidate && !req.TriggeredByLeadershipTransfer {
 		r.logger.Printf("[WARN] raft: Rejecting vote request from %v since we have a leader: %v",
 			candidate, leader)
 		return
@@ -1447,12 +1447,12 @@ func (r *Raft) electSelf() <-chan *voteResult {
 	// Construct the request
 	lastIdx, lastTerm := r.getLastEntry()
 	req := &RequestVoteRequest{
-		RPCHeader:                       r.getRPCHeader(),
-		Term:                            r.getCurrentTerm(),
-		Candidate:                       r.trans.EncodePeer(r.localID, r.localAddr),
-		LastLogIndex:                    lastIdx,
-		LastLogTerm:                     lastTerm,
-		TriggeredByTransitionLeadership: r.candidateFromTransitionLeadership,
+		RPCHeader:                     r.getRPCHeader(),
+		Term:                          r.getCurrentTerm(),
+		Candidate:                     r.trans.EncodePeer(r.localID, r.localAddr),
+		LastLogIndex:                  lastIdx,
+		LastLogTerm:                   lastTerm,
+		TriggeredByLeadershipTransfer: r.candidateFromLeadershipTransfer,
 	}
 
 	// Construct a function to ask for a vote
@@ -1547,12 +1547,12 @@ func (r *Raft) pickServer() *Server {
 	return nil
 }
 
-func (r *Raft) transitionLeadership(id ServerID, address ServerAddress) TransitionLeadershipFuture {
-	future := &transitionLeadershipFuture{ID: id, Address: address}
+func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress) LeadershipTransferFuture {
+	future := &leadershipTransferFuture{ID: id, Address: address}
 	future.init()
 
 	select {
-	case r.transitionLeadershipCh <- future:
+	case r.leadershipTransferCh <- future:
 		return future
 	case <-r.shutdownCh:
 		return errorFuture{ErrRaftShutdown}
@@ -1564,6 +1564,6 @@ func (r *Raft) transitionLeadership(id ServerID, address ServerAddress) Transiti
 func (r *Raft) timeoutNow(rpc RPC, req *TimeoutNowRequest) {
 	r.setLeader("")
 	r.setState(Candidate)
-	r.candidateFromTransitionLeadership = true
+	r.candidateFromLeadershipTransfer = true
 	rpc.Respond(&TimeoutNowResponse{}, nil)
 }
