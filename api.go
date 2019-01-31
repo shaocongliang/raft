@@ -49,6 +49,8 @@ var (
 	// cluster that already has state present.
 	ErrCantBootstrap = errors.New("bootstrap only works on new clusters")
 
+	// ErrLeadershipTransferInProgress is returned when the leader is rejecting
+	// client requests because it is attempting to transfer leadership.
 	ErrLeadershipTransferInProgress = errors.New("leadership transfer in progress")
 )
 
@@ -98,6 +100,9 @@ type Raft struct {
 	// leaderState used only while state is leader
 	leaderState leaderState
 
+	// candidateFromLeadershipTransfer is used to indicate that this server became
+	// candidate because the leader tries to transfer leadership. This flag is
+	// used in requestvote to express that a leadership transfer is going on.
 	candidateFromLeadershipTransfer bool
 
 	// Stores our local server ID, used to avoid sending RPCs to ourself
@@ -161,6 +166,8 @@ type Raft struct {
 	observersLock sync.RWMutex
 	observers     map[uint64]*Observer
 
+	// leadershipTransferCh is used to start a leadership transfer from outside of
+	// the main thread.
 	leadershipTransferCh chan *leadershipTransferFuture
 }
 
