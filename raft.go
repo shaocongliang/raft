@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"sync/atomic"
 	"time"
 
 	"github.com/armon/go-metrics"
@@ -84,7 +85,7 @@ type leaderState struct {
 	notify                       map[*verifyFuture]struct{}
 	stepDown                     chan struct{}
 	lease                        <-chan time.Time
-	leadershipTransferInProgress bool // indicates that a leadership transfer is in progress.
+	leadershipTransferInProgress *int32 // indicates that a leadership transfer is in progress.
 }
 
 // setLeader is used to modify the current leader of the cluster
@@ -330,6 +331,39 @@ func (r *Raft) runCandidate() {
 	}
 }
 
+func (r *Raft) setLeadershipTransferInProgress(v bool) {
+	if v {
+		atomic.StoreInt32(r.leaderState.leadershipTransferInProgress, 1)
+	} else {
+		atomic.StoreInt32(r.leaderState.leadershipTransferInProgress, 0)
+	}
+}
+
+func (r *Raft) getLeadershipTransferInProgress() bool {
+	if r.leaderState.leadershipTransferInProgress == nil {
+		return false
+	}
+	v := atomic.LoadInt32(r.leaderState.leadershipTransferInProgress)
+	if v == 1 {
+		return true
+	}
+	return false
+}
+
+func (r *Raft) setupLeaderState() {
+	r.leaderState.commitCh = make(chan struct{}, 1)
+	r.leaderState.commitment = newCommitment(r.leaderState.commitCh,
+		r.configurations.latest,
+		r.getLastIndex()+1 /* first index that may be committed in this term */)
+	r.leaderState.inflight = list.New()
+	r.leaderState.replState = make(map[ServerID]*followerReplication)
+	r.leaderState.notify = make(map[*verifyFuture]struct{})
+	r.leaderState.stepDown = make(chan struct{}, 1)
+	r.leaderState.lease = time.After(r.conf.LeaderLeaseTimeout)
+	var zero int32
+	r.leaderState.leadershipTransferInProgress = &zero
+}
+
 // runLeader runs the FSM for a leader. Do the setup here and drop into
 // the leaderLoop for the hot loop.
 func (r *Raft) runLeader() {
@@ -347,17 +381,7 @@ func (r *Raft) runLeader() {
 		}
 	}
 
-	// Setup leader state
-	r.leaderState.commitCh = make(chan struct{}, 1)
-	r.leaderState.commitment = newCommitment(r.leaderState.commitCh,
-		r.configurations.latest,
-		r.getLastIndex()+1 /* first index that may be committed in this term */)
-	r.leaderState.inflight = list.New()
-	r.leaderState.replState = make(map[ServerID]*followerReplication)
-	r.leaderState.notify = make(map[*verifyFuture]struct{})
-	r.leaderState.stepDown = make(chan struct{}, 1)
-	r.leaderState.lease = time.After(r.conf.LeaderLeaseTimeout)
-	r.leaderState.leadershipTransferInProgress = false
+	r.setupLeaderState()
 
 	// Cleanup state on step down
 	defer func() {
@@ -523,7 +547,7 @@ func (r *Raft) leaderLoop() {
 			r.setState(Follower)
 
 		case future := <-r.leadershipTransferCh:
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				future.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -598,7 +622,7 @@ func (r *Raft) leaderLoop() {
 			}
 
 		case v := <-r.verifyCh:
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				v.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -627,7 +651,7 @@ func (r *Raft) leaderLoop() {
 			}
 
 		case future := <-r.userRestoreCh:
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				future.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -636,7 +660,7 @@ func (r *Raft) leaderLoop() {
 			future.respond(err)
 
 		case future := <-r.configurationsCh:
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				future.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -645,7 +669,7 @@ func (r *Raft) leaderLoop() {
 			future.respond(nil)
 
 		case future := <-r.configurationChangeChIfStable():
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				future.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -656,7 +680,7 @@ func (r *Raft) leaderLoop() {
 			b.respond(ErrCantBootstrap)
 
 		case newLog := <-r.applyCh:
-			if r.leaderState.leadershipTransferInProgress {
+			if r.getLeadershipTransferInProgress() {
 				r.logger.Printf("[DEBUG] raft: %s", ErrLeadershipTransferInProgress)
 				newLog.respond(ErrLeadershipTransferInProgress)
 				continue
@@ -732,8 +756,8 @@ func (r *Raft) verifyLeader(v *verifyFuture) {
 func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, stopCh, doneCh chan error) {
 
 	// Step 1: set this field which stops this leader from responding to any client requests.
-	r.leaderState.leadershipTransferInProgress = true
-	defer func() { r.leaderState.leadershipTransferInProgress = false }()
+	r.setLeadershipTransferInProgress(true)
+	defer func() { r.setLeadershipTransferInProgress(false) }()
 
 	// Step 2: make sure the target server is up to date
 	s, ok := r.leaderState.replState[id]
